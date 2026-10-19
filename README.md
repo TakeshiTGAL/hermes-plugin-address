@@ -77,6 +77,8 @@ HTTP that is not 200 is `upstream`. A 200 body that is not a JSON object, or who
 
 Hermes turns this tool on for every surface, including the gateway, until you turn a surface off with `hermes tools`. The plugin has no user list of its own. Anyone you allow on a gateway can call the tool. It does not ask for approval. Cron, yolo, approvals off, and an unattended session still send the GET when the tool runs. This plugin creates no cron job. It has no slash command for `hermes tools` to stop.
 
+While this plugin is enabled, its `japanese-address` skill adds one line to the skills index of every session on every platform. That line stays on a platform where `hermes tools` turned the tool off; the skill can still be read there, but `address_split` is unavailable. The model in any session, including one a gateway admits a guest to, can load the skill. The skill is instructions only and sends nothing. `hermes plugins disable jp-address` removes the tool and the skill together.
+
 ## Attribution
 
 Every result, including a failure, has this `attribution` value:
@@ -134,7 +136,7 @@ The 34 Hokkaido types in 札幌市中央区, 札幌市北区, 帯広市, and 旭
 
 ## What was not checked
 
-- `address_split` was not called from a Hermes model.
+- Calls from Hermes are a small sample: 18 sessions with five models before the 0.1.1 change, and the same scenarios after it (see CHANGELOG.md).
 - Full agreement with `@geolonia/normalize-japanese-addresses` was not tested. A listed county is matched with or without the county in the input. A county that is not on the row is not added. Kyoto street deletion is not implemented. `澤` and `沢` are not folded. `舘` and `館` are not folded. `ヶ` and `ケ` are not folded. NFKC still folds compatibility kanji and fullwidth digits on both the input and the town-file name.
 - How many prefectures share one municipality name in the public list is not a claim of this plugin. `ambiguous_city` is tested with a fixture.
 - Block and lot `.txt` files are not fetched. The registry map terms were not opened.

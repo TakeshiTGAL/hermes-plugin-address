@@ -2,6 +2,7 @@
 
 import ast
 import json
+import pytest
 from pathlib import Path
 
 import yaml
@@ -140,6 +141,10 @@ def test_names_and_register_surface():
         "A result with no level has status ambiguous_town, ambiguous_city, upstream, or bad_args."
         in call["schema"]["description"]
     )
+    desc = call["schema"]["description"]
+    assert desc.startswith("Split one Japanese address into prefecture, city, and town.")
+    assert "Do not look the address up on a map site or with web search instead." in desc
+    assert "Keep other in your reply, and copy attribution into your reply." in desc
 
 
 def test_catalog_description_states_the_facts():
@@ -156,9 +161,9 @@ def test_catalog_description_states_the_facts():
     assert "no API key" in disclosure
     assert "gateway" in disclosure and "hermes tools" in disclosure and "no approval" in disclosure
     assert "CC BY 4.0" in desc
-    assert "Not tested from a Hermes model." in desc
+    assert "Called from Hermes with five models in a small sample of 18 sessions" in desc
     assert manifest["name"] == "jp-address"
-    assert manifest["version"] == "0.1.0"
+    assert manifest["version"] == "0.1.1"
     assert manifest["manifest_version"] == 2
     assert manifest["requires_hermes"] == ">=0.21.4"
     assert manifest["python_dependencies"] == []
@@ -187,7 +192,7 @@ def test_readme_required_sentences():
     assert "does not become the one-character town" in readme
     assert "There is no daily limit." in readme
     assert "大字泊村字メノコ走" in readme
-    assert "was not called from a Hermes model" in readme
+    assert "Calls from Hermes are a small sample: 18 sessions with five models" in readme
     assert "not a port of normalize-japanese-addresses" in readme
     assert "The source lists longitude first; results name lat and lng." in readme
 
@@ -818,3 +823,39 @@ def test_no_point_town_uses_city_not_zero():
     assert got["level"] == 3 and got["town"] == "猿楽町一丁目"
     assert got["point"]["level"] == 2 and got["point"]["lat"] == 35.694003
     assert got["point"]["lat"] != 0
+
+
+def test_base_url_comes_from_the_secret_scope_not_the_process_environment(monkeypatch):
+    scope = pytest.importorskip("agent.secret_scope")
+    if getattr(scope, "IS_TEST_STAND_IN", False):
+        pytest.skip("needs Hermes for multi-profile secret scopes")
+    seen = []
+
+    def fake_split(text, *, base, fetch):
+        seen.append(base)
+        return {"level": 0, "other": ""}
+
+    monkeypatch.setattr(address, "split_address", fake_split)
+    monkeypatch.setenv("JP_ADDRESS_BASE_URL", "https://wrong-profile.invalid/ja")
+    scope.set_multiplex_active(True)
+    token = scope.set_secret_scope({"JP_ADDRESS_BASE_URL": "http://127.0.0.1:9/ja"})
+    try:
+        address.address_split({"address": "東京都千代田区丸の内一丁目"})
+    finally:
+        scope.reset_secret_scope(token)
+        scope.set_multiplex_active(False)
+    assert seen and "wrong-profile" not in str(seen[0])
+    assert "127.0.0.1" in str(seen[0])
+
+
+def test_unscoped_multiplex_call_is_not_swallowed(monkeypatch):
+    scope = pytest.importorskip("agent.secret_scope")
+    if getattr(scope, "IS_TEST_STAND_IN", False):
+        pytest.skip("needs Hermes for multi-profile secret scopes")
+    monkeypatch.setenv("JP_ADDRESS_BASE_URL", "https://wrong-profile.invalid/ja")
+    scope.set_multiplex_active(True)
+    try:
+        with pytest.raises(scope.UnscopedSecretError):
+            address.address_split({"address": "東京都千代田区丸の内一丁目"})
+    finally:
+        scope.set_multiplex_active(False)

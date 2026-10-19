@@ -7,7 +7,6 @@ import gzip
 import http.client
 import io
 import json
-import os
 import time
 import unicodedata
 import urllib.error
@@ -20,7 +19,7 @@ TOOLSET = "jp_address"
 _LIST_URL = "https://japanese-addresses-v2.geoloniamaps.com/api/ja.json"
 DEFAULT_BASE = _LIST_URL[: -len(".json")]
 # Cloudflare answers 403 error 1010 to Python-urllib's default User-Agent (2026-10-08).
-USER_AGENT = "jp-address/0.1.0"
+USER_AGENT = "jp-address/0.1.1"
 # Both the socket timeout and the deadline for one whole GET, in seconds.
 TIMEOUT = 30
 LIMIT = 8_000_000
@@ -32,8 +31,29 @@ ATTRIBUTION = (
     "「アドレス・ベース・レジストリ」（デジタル庁）（https://dataset.address-br.digital.go.jp）をもとに株式会社 Geolonia が作成し、jp-address が町丁目までを選択した。"
 )
 
-MSG_EXTRA = "address_split takes only an address string."
-MSG_LENGTH = "The address must be a string of 400 characters or fewer."
+MSG_EXTRA = (
+    "address_split takes only an address string. "
+    "Drop every other argument and pass address, for example 東京都千代田区霞が関2-1-2."
+)
+MSG_LENGTH = (
+    "The address must be a string of 400 characters or fewer. "
+    "Pass address as one string, for example 東京都千代田区霞が関2-1-2."
+)
+MSG_SCRIPT = (
+    "Write the address in Japanese and include the prefecture, "
+    "for example 東京都千代田区霞が関2-1-2."
+)
+_PREFECTURES = (
+    "北海道",
+    "青森県", "岩手県", "宮城県", "秋田県", "山形県", "福島県",
+    "茨城県", "栃木県", "群馬県", "埼玉県", "千葉県", "東京都", "神奈川県",
+    "新潟県", "富山県", "石川県", "福井県", "山梨県", "長野県",
+    "岐阜県", "静岡県", "愛知県", "三重県",
+    "滋賀県", "京都府", "大阪府", "兵庫県", "奈良県", "和歌山県",
+    "鳥取県", "島根県", "岡山県", "広島県", "山口県",
+    "徳島県", "香川県", "愛媛県", "高知県",
+    "福岡県", "佐賀県", "長崎県", "熊本県", "大分県", "宮崎県", "鹿児島県", "沖縄県",
+)
 MSG_URL = "JP_ADDRESS_BASE_URL is not a usable origin."
 MSG_CITY = "This municipality name is in more than one prefecture. Include the prefecture."
 MSG_MUNI = "This name matches more than one municipality. Include the county."
@@ -500,7 +520,24 @@ def _upstream(status: int | None) -> dict:
 
 
 def _bad(message: str) -> dict:
-    return _with_attribution({"status": "bad_args", "message": message})
+    return _with_attribution({
+        "status": "bad_args",
+        "message": message,
+        "ok": False,
+        "error_type": "bad_args",
+    })
+
+
+def _expand_pref_prefix(text: str) -> str:
+    """東京千代田区 becomes 東京都千代田区. A name that already has 都府県 is unchanged."""
+    for full in _PREFECTURES:
+        if text.startswith(full):
+            return text
+    for full in _PREFECTURES:
+        short = full[:-1] if full.endswith(("都", "府", "県")) else full
+        if text.startswith(short):
+            return full + text[len(short):]
+    return text
 
 
 def _normalize(text: str) -> str:
@@ -592,6 +629,11 @@ def split_address(address, *, base: str, fetch: Fetch) -> dict:
         return _upstream(status)
 
     pref_hits = _longest(prefs, text, lambda item: item["name"])
+    if not pref_hits:
+        expanded = _expand_pref_prefix(text)
+        if expanded != text:
+            text = expanded
+            pref_hits = _longest(prefs, text, lambda item: item["name"])
     if len({item["name"] for item in pref_hits}) > 1:
         return _upstream(200)
     pref = pref_hits[0] if pref_hits else None
@@ -633,6 +675,8 @@ def split_address(address, *, base: str, fetch: Fetch) -> dict:
         if len(hits) >= 2:
             return _ambiguous_municipalities([(city, name) for _item, city, name in hits])
         if not hits:
+            if text.isascii() and text.isalpha():
+                return _bad(MSG_SCRIPT)
             return _with_attribution({"level": 0, "other": text})
         pref, city, matched = hits[0]
         pref_point = pref["point"]
@@ -789,8 +833,11 @@ def _town_name(row: dict) -> str:
 def address_split(args, **_kwargs) -> str:
     if not isinstance(args, dict) or set(args) - {"address"}:
         return json.dumps(_bad(MSG_EXTRA), ensure_ascii=False)
-    if "JP_ADDRESS_BASE_URL" in os.environ:
-        base = usable_base(os.environ["JP_ADDRESS_BASE_URL"])
+    from agent.secret_scope import get_secret
+
+    configured = get_secret("JP_ADDRESS_BASE_URL")
+    if configured is not None:
+        base = usable_base(configured)
         if base is None:
             return json.dumps(_bad(MSG_URL), ensure_ascii=False)
     else:
@@ -806,18 +853,20 @@ def register(ctx) -> None:
         schema={
             "name": "address_split",
             "description": (
-                "Split one Japanese address into prefecture, city, town, and the remainder. "
+                "Split one Japanese address into prefecture, city, and town. "
+                "Do not look the address up on a map site or with web search instead. "
+                "Returns pref, city, town, other (the house number, building, and anything else left over), level, "
+                "an optional point, and attribution. Keep other in your reply, and copy attribution into your reply. "
                 "The only argument is address, a string of 400 characters or fewer. "
-                "Levels are 0, 1, 2, or 3. "
                 "When a point is present, the source lists longitude first; results name lat and lng. "
                 "A point can be coarser than the town and is not a rooftop geocode. "
-                "At most two GET requests are sent, and only after the base URL is accepted. "
-                "Plain http is refused except for 127.0.0.1 and localhost. "
                 "The matched prefecture and municipality names go into the URL path; the house number does not. "
+                "This parser parses a Japan street or postal address; "
+                "normalization extracts the prefecture even without 都, 府, or 県. "
                 "No API key is read or sent. "
                 "A result with no level has status ambiguous_town, ambiguous_city, upstream, or bad_args. "
                 "An ambiguous_town result lists the towns it could not choose between. "
-                "Every result carries an attribution string that has to be shown with the result."
+                "Every result carries an attribution string that must be shown with it."
             ),
             "parameters": {
                 "type": "object",
@@ -833,3 +882,16 @@ def register(ctx) -> None:
         },
         handler=address_split,
     )
+    try:
+        from pathlib import Path
+        ctx.register_skill(
+            "japanese-address",
+            Path(__file__).resolve().parent / "skills" / "japanese-address" / "SKILL.md",
+            description=(
+                "Split a Japanese address into prefecture, city, and town. "
+                "Before web_search, use tool_search to find address_split and tool_call to run it."
+            ),
+        )
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning("jp-address skill was not registered", exc_info=True)
