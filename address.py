@@ -19,7 +19,12 @@ TOOLSET = "jp_address"
 _LIST_URL = "https://japanese-addresses-v2.geoloniamaps.com/api/ja.json"
 DEFAULT_BASE = _LIST_URL[: -len(".json")]
 # Cloudflare answers 403 error 1010 to Python-urllib's default User-Agent (2026-10-08).
-USER_AGENT = "jp-address/0.1.1"
+USER_AGENT = "jp-address/0.1.7"
+
+try:
+    from . import seen
+except ImportError:
+    import seen
 # Both the socket timeout and the deadline for one whole GET, in seconds.
 TIMEOUT = 30
 LIMIT = 8_000_000
@@ -507,7 +512,18 @@ def _id_of(row: dict):
     return None
 
 
+_ABSENT_BY_LEVEL = {
+    0: ["pref", "city", "town"],
+    1: ["city", "town"],
+    2: ["town"],
+    3: [],
+}
+
+
 def _with_attribution(body: dict) -> dict:
+    level = body.get("level")
+    if isinstance(level, int) and not isinstance(level, bool) and level in _ABSENT_BY_LEVEL:
+        body["absent"] = list(_ABSENT_BY_LEVEL[level])
     body["attribution"] = ATTRIBUTION
     return body
 
@@ -846,6 +862,75 @@ def address_split(args, **_kwargs) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
+_SKILL_DESCRIPTION = (
+    "Split a Japanese address into prefecture, city, and town. "
+    "Before web_search, use tool_search to find address_split and tool_call it "
+    "only with an address copied from a tool result. "
+    "If none, say the address was not returned and was not split. "
+    "absent lists pref, city, and town at level 0; city and town at level 1; town at level 2; none at level 3. "
+    "Those parts are not 0."
+)
+
+
+def _nudge_address(user_message="", session_id="", conversation_history=None, **_kwargs):
+    # Read the previous turn's split before this turn's record is cleared.
+    found = seen.facts(session_id or "")
+    pref = found.get("pref") or ""
+    if pref:
+        branch = (
+            f"address_split returned {pref}. The address was split. "
+            "Copy that prefecture. Do not say the address is missing. "
+            "Do not say that no prefecture was named."
+        )
+    elif found.get("split_kind") == "level0":
+        branch = (
+            "address_split returned level 0. pref is absent. "
+            "The address was not split. Do not name a prefecture."
+        )
+    elif found.get("split_kind") == "bad_args":
+        branch = (
+            "address_split returned bad_args. The address was not split. "
+            "Do not name a prefecture."
+        )
+    elif found.get("split_kind") == "upstream":
+        branch = (
+            "address_split returned upstream. The address was not split. "
+            "Do not name a prefecture."
+        )
+    elif found.get("address") and not found.get("split"):
+        branch = (
+            "An address string was returned and was not split. "
+            "Do not name a prefecture that a split did not return."
+        )
+    else:
+        branch = (
+            "If no tool result contains an address, say the address was not returned "
+            "and was not split. Do not name a prefecture, city, or town."
+        )
+    seen.note_user(session_id or "", user_message, conversation_history)
+    if not seen.in_address_turn(user_message, conversation_history):
+        return None
+    return {"context": (
+        "Call address_split only with an address string copied from a tool result. "
+        "Do not call tool_describe. address_split is not blocked. "
+        + branch + " "
+        "absent lists the parts that level did not resolve: "
+        "level 0 lists pref, city, and town; level 1 lists city and town; level 2 lists town; "
+        "level 3 lists none. A missing part is not written as 0. "
+        "Do not write 確認しました or 確認できます unless the tool result contains that sentence."
+    )}
+
+
+def _remember_address(tool_name="", result=None, session_id="", **_kwargs):
+    """Observe a tool result. Return None so the result string is left as it is."""
+    seen.remember(session_id or "", tool_name or "", result)
+    return None
+
+
+def _correct_address(response_text="", session_id="", **_kwargs):
+    return seen.correct(session_id or "", response_text or "")
+
+
 def register(ctx) -> None:
     ctx.register_tool(
         name="address_split",
@@ -882,15 +967,22 @@ def register(ctx) -> None:
         },
         handler=address_split,
     )
+    for hook_name, callback in (
+        ("pre_llm_call", _nudge_address),
+        ("transform_tool_result", _remember_address),
+        ("transform_llm_output", _correct_address),
+    ):
+        try:
+            ctx.register_hook(hook_name, callback)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning("jp-address %s hook unavailable", hook_name, exc_info=True)
     try:
         from pathlib import Path
         ctx.register_skill(
             "japanese-address",
             Path(__file__).resolve().parent / "skills" / "japanese-address" / "SKILL.md",
-            description=(
-                "Split a Japanese address into prefecture, city, and town. "
-                "Before web_search, use tool_search to find address_split and tool_call to run it."
-            ),
+            description=_SKILL_DESCRIPTION,
         )
     except Exception:
         import logging

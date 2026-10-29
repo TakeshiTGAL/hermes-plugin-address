@@ -1,10 +1,18 @@
 # jp-address
 
+## 何が唯一か
+
+A registered address from a company record is split into prefecture, city, town, and the remainder, and only the parts the address data contains are returned. When `level` is below 3, `absent` lists the missing parts (`pref`, `city`, `town` at level 0; `city` and `town` at level 1; `town` at level 2). Level 3 sets `absent` to an empty list. A missing part is not filled with 0. `pre_llm_call` reads the tool results remembered in this process. When no tool result contains an address, it tells the model to say the address was not returned and was not split, and to name those `absent` parts by level, and not to name a prefecture. When `address_split` returned `pref`, it tells the model to copy that prefecture and not to say the address is missing. When `address_split` was called and `pref` is absent, a prefecture named in the reply is removed. level 0, bad_args, and upstream are not described as a completed split. `pre_llm_call` adds its paragraph only on an address question, and adds nothing on other turns. An address question is 所在地, 住所, 都道府県, 丁目, 番地, a prefecture name, or `address_split` called in the previous turn. A company name, フィボナッチ数列, and グラタン皿 do not add it. `transform_llm_output` returns no string when jp-charts would append its tool-record line, which is decided from the tool record and not from success wording. When `address_split` returned a prefecture, a false absence sentence is corrected. When it returned no prefecture, a named prefecture is removed. The model's other sentences stay. `address_split` is not blocked. A missing part is not filled with 0. The tool does not decide that a company is eligible for a subsidy, and it does not return financial figures.
+
+## Comparison
+
+Facts checked for the cluster note on 2026-10-26. SPEEDA's company page shows a registered address as part of a company record that also includes industry reports. This tool splits one Japanese address string and returns the Geolonia attribution. It does not return financials or a report.
+
 Splits one Japanese address into prefecture, city, town and the remainder, using Geolonia's address data.
 
-The product name is `jp-address`. The only tool is `address_split`. The toolset is `jp_address`. There is no slash command, no CLI, and no cron job. The plugin does not register a hook.
+The product name is `jp-address`. The only tool is `address_split`. The toolset is `jp_address`. There is no slash command, no CLI, and no cron job. The plugin registers `pre_llm_call`, `transform_tool_result`, and `transform_llm_output`. `pre_llm_call` runs only on an address question: 所在地, 住所, 都道府県, 丁目, 番地, a prefecture name, or `address_split` called in the previous turn. A company name, フィボナッチ数列, and グラタン皿 do not add the paragraph. A tool name typed in the message is not a call. On any other turn, including hermes の設定はどこで見る？, the hook adds nothing. When it runs, the paragraph is: "Call address_split only with an address string copied from a tool result. Do not call tool_describe. address_split is not blocked." Then one branch from the previous turn's tool record: a returned prefecture is copied; level 0, bad_args, and upstream say the address was not split; an address string that was not split must not be given a prefecture the split did not return; otherwise the address was not returned and was not split. It then says absent lists pref, city, and town at level 0, city and town at level 1, town at level 2, and none at level 3, a missing part is not written as 0, and not to write 確認しました or 確認できます unless the tool result contains that sentence. `transform_tool_result` returns no string. `address_split` is not blocked.
 
-`manifest_version` is 2. `requires_hermes` is `>=0.21.4`. The version is 0.1.0. The license is MIT. Dependencies are the Python standard library only. There is no NOTICE file. Upstream MIT scripts are not included. Logos are not used.
+`manifest_version` is 2. `requires_hermes` is `>=0.21.4`. The version is 0.1.9. The license is MIT. Dependencies are the Python standard library only. There is no NOTICE file. Upstream MIT scripts are not included. Logos are not used.
 
 ## Tool
 
@@ -77,7 +85,7 @@ HTTP that is not 200 is `upstream`. A 200 body that is not a JSON object, or who
 
 Hermes turns this tool on for every surface, including the gateway, until you turn a surface off with `hermes tools`. The plugin has no user list of its own. Anyone you allow on a gateway can call the tool. It does not ask for approval. Cron, yolo, approvals off, and an unattended session still send the GET when the tool runs. This plugin creates no cron job. It has no slash command for `hermes tools` to stop.
 
-While this plugin is enabled, its `japanese-address` skill adds one line to the skills index of every session on every platform. That line stays on a platform where `hermes tools` turned the tool off; the skill can still be read there, but `address_split` is unavailable. The model in any session, including one a gateway admits a guest to, can load the skill. The skill is instructions only and sends nothing. `hermes plugins disable jp-address` removes the tool and the skill together.
+On a platform where `hermes tools` turned the tool off, `address_split` is unavailable. The model in any session, including one a gateway admits a guest to, can load the skill. The skill is instructions only and sends nothing. `hermes plugins disable jp-address` removes the tool and the skill together.
 
 ## Attribution
 

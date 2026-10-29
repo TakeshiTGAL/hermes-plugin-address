@@ -163,12 +163,14 @@ def test_catalog_description_states_the_facts():
     assert "CC BY 4.0" in desc
     assert "Called from Hermes with five models in a small sample of 18 sessions" in desc
     assert manifest["name"] == "jp-address"
-    assert manifest["version"] == "0.1.1"
+    assert manifest["version"] == "0.1.9"
     assert manifest["manifest_version"] == 2
     assert manifest["requires_hermes"] == ">=0.21.4"
     assert manifest["python_dependencies"] == []
     assert manifest["provides_tools"] == ["address_split"]
-    assert manifest["provides_hooks"] == []
+    assert manifest["provides_hooks"] == [
+        "pre_llm_call", "transform_tool_result", "transform_llm_output",
+    ]
 
 
 def test_readme_required_sentences():
@@ -206,6 +208,7 @@ def test_three_chome_forms_and_no_secret_fields():
     ):
         result, calls = _run(text)
         assert result["level"] == 3
+        assert result["absent"] == []
         assert result["pref"] == "東京都"
         assert result["city"] == "千代田区"
         assert result["town"] == "霞が関二丁目"
@@ -223,11 +226,12 @@ def test_three_chome_forms_and_no_secret_fields():
 
 def test_bare_kasumi_and_wrong_prefecture_do_not_guess():
     bare, calls = _run("東京都千代田区霞が関")
-    assert bare["level"] == 2 and bare["other"] == "霞が関" and "town" not in bare
+    assert bare["level"] == 2 and bare["absent"] == ["town"] and bare["other"] == "霞が関" and "town" not in bare
     assert bare["point"] == {"lat": 35.694003, "lng": 139.753634, "level": 2}
     assert len(calls) == 2
     stayed, calls = _run("東京都大阪市")
-    assert stayed["level"] == 1 and stayed["pref"] == "東京都" and stayed["other"] == "大阪市"
+    assert stayed["level"] == 1 and stayed["absent"] == ["city", "town"]
+    assert stayed["pref"] == "東京都" and stayed["other"] == "大阪市"
     assert "city" not in stayed and len(calls) == 1
     assert all("大阪" not in url for url in calls)
 
@@ -810,7 +814,124 @@ def test_retry_is_one_request():
 
     got = address.split_address("東京都", base=BASE, fetch=fetch)
     assert got["message"] == address.MSG_UPSTREAM and "HTTP" not in got["message"]
-    assert len(calls) == 1 and "level" not in got
+    assert len(calls) == 1 and "level" not in got and "absent" not in got
+
+
+def test_nudge_is_absent_on_a_settings_question():
+    address.seen.clear()
+    assert address._nudge_address(user_message="hermes の設定はどこで見る？") is None
+    assert address._nudge_address(user_message="コーヒーの入れ方") is None
+    address.seen.clear()
+
+
+def test_nudge_says_an_unreturned_address_was_not_split():
+    address.seen.clear()
+    text = address._nudge_address(user_message="所在地を教えて。")["context"]
+    assert "was not split" in text
+    assert "level 0 lists pref, city, and town" in text
+    assert "level 3 lists none" in text
+    assert "not written as 0" in text
+    assert "確認できます" in text
+
+
+def test_nudge_copies_a_returned_prefecture():
+    address.seen.clear()
+    address.seen.remember(
+        "s-pref", "address_split", json.dumps({"pref": "愛知県", "level": 1, "absent": ["city", "town"]}),
+    )
+    text = address._nudge_address(user_message="所在地", session_id="s-pref")["context"]
+    assert "愛知県" in text
+    assert "was not returned" not in text
+    assert "not written as 0" in text
+    address.seen.clear()
+
+
+def test_transform_keeps_a_false_absence_for_charts_when_a_key_note_was_dropped():
+    address.seen.clear()
+    address.seen.remember(
+        "s-yield", "address_split", json.dumps({"pref": "愛知県"}),
+    )
+    address.seen.remember(
+        "s-yield",
+        "jp_corp_search",
+        json.dumps({
+            "error": "token_missing",
+            "next_step": "GBIZINFO_API_TOKEN is not set. Apply at https://info.gbiz.go.jp/",
+        }),
+    )
+    out = address._correct_address(
+        response_text="A prefecture was not named.",
+        session_id="s-yield",
+    )
+    assert isinstance(out, str)
+    assert "愛知県" in out
+    assert "A prefecture was not named." not in out
+    address.seen.clear()
+
+
+def test_transform_replaces_a_false_absence_when_charts_would_not():
+    address.seen.clear()
+    address.seen.remember(
+        "s-fix", "address_split", json.dumps({"pref": "愛知県"}),
+    )
+    out = address._correct_address(
+        response_text="売上は 100 円。The registered address was not returned, so it was not split.",
+        session_id="s-fix",
+    )
+    assert "100" in out
+    assert "愛知県" in out
+    assert "was not returned" not in out
+    assert "was split" in out
+    assert "not written as 0" in out
+    address.seen.clear()
+
+
+def test_called_split_without_a_prefecture_does_not_keep_one():
+    address.seen.clear()
+    cases = (
+        ("s-l0", {"level": 0, "absent": ["pref", "city", "town"], "other": "豊田"}, "level 0"),
+        ("s-bad", {"status": "bad_args", "error_type": "bad_args", "ok": False}, "bad_args"),
+        ("s-up", {"status": "upstream", "message": "upstream"}, "upstream"),
+    )
+    for sid, payload, marker in cases:
+        address.seen.clear()
+        address.seen.remember(sid, "address_split", json.dumps(payload))
+        out = address._correct_address(
+            response_text="登記の所在地は愛知県です。",
+            session_id=sid,
+        )
+        assert isinstance(out, str)
+        assert "愛知県" not in out
+        assert "the address was split" not in out
+        assert "was not split" in out
+        assert marker in out
+    address.seen.clear()
+
+
+def test_transform_leaves_a_prefecture_when_address_split_was_not_called():
+    """A prefecture in the reply stays when address_split was not called this turn."""
+    address.seen.clear()
+    assert address._correct_address(
+        response_text="登記の所在地は愛知県です。",
+        session_id="s-none",
+    ) is None
+    address.seen.clear()
+
+
+def test_remember_hook_does_not_replace_the_tool_result():
+    address.seen.clear()
+    assert address._remember_address(
+        tool_name="address_split",
+        result=json.dumps({"pref": "愛知県"}),
+        session_id="s-none-hook",
+    ) is None
+    address.seen.clear()
+
+
+def test_blank_address_lists_every_part_absent():
+    got = address.split_address("   ", base="http://127.0.0.1:9/ja", fetch=lambda _url: (_ for _ in ()).throw(AssertionError("fetch")))
+    assert got["level"] == 0
+    assert got["absent"] == ["pref", "city", "town"]
 
 
 def test_hyphen_after_kanji_town():

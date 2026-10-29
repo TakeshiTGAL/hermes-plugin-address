@@ -1,4 +1,4 @@
-"""jp-address: one tool, address_split. No hooks, slash command, CLI, or cron."""
+"""jp-address: one tool, address_split. No slash command, CLI, or cron."""
 
 
 def register(ctx) -> None:

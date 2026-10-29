@@ -1,4 +1,4 @@
-"""Row 8 and the production opener. Skipped when preship blocks sockets."""
+"""Row 8 and the production opener. Skipped when the sandbox blocks sockets."""
 
 import json
 import socket
